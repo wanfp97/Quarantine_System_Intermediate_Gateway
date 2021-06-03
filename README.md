@@ -1,0 +1,2 @@
+# Quarantine_System_Intermediate_Gateway
+Platformio project repository for Quarantine System Intermediate Gateway
