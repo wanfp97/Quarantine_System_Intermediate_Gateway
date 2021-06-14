@@ -1,3 +1,4 @@
+#define DEBUG
 #include "MyLora_E22.h"
 
 bool MyLoRa_E22 :: set_e22_configuration(uint8_t addr_h, uint8_t addr_l, byte chan, bool lbt, TRANSMISSION_POWER dBm, 
@@ -6,6 +7,11 @@ AIR_DATA_RATE air_data_rate, uint8_t crypt_h, uint8_t crypt_l, bool keep_others)
   c = getConfiguration();
   // It's important get configuration pointer before all other operation
   Configuration configuration = *(Configuration*) c.data;
+
+  #ifdef DEBUG
+    Serial.println(F("E22 return value:"));
+    Serial.println(reinterpret_cast<char*> (&configuration));
+  #endif
   
   configuration.ADDL = addr_l;
   configuration.ADDH = addr_h;
@@ -39,8 +45,14 @@ AIR_DATA_RATE air_data_rate, uint8_t crypt_h, uint8_t crypt_l, bool keep_others)
     configuration.TRANSMISSION_MODE.WORTransceiverControl = WOR_RECEIVER;
     configuration.TRANSMISSION_MODE.WORPeriod = WOR_2000_011;
   }
+  
+  
 
   ResponseStatus rs = setConfiguration(configuration, WRITE_CFG_PWR_DWN_SAVE);
+  #ifdef DEBUG
+    Serial.println(rs.getResponseDescription());
+    Serial.println(rs.code);
+  #endif
 	if(rs.code == SUCCESS) {
     return true;
   }

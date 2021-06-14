@@ -1,6 +1,7 @@
 #define DEBUG
 
 #define E22_30    //EBYTE E22_30 series
+#define FREQUENCY_850     //base frequency of E22 module
 #define MY_CRC8_POLY 0xAB     //used for 8bit crc
 #define MY_CRC16_POLY 0xABAB    //used for 16 bit crc
 
@@ -28,7 +29,7 @@ void admin_mode1();
 void admin_mode2();
 bool new_qb_sync();
 void qb_setting();
-bool send_to_qb(uint32_t max_time_ms, String message, String ack);
+bool send_to_qb(uint32_t max_time_ms, char* message, unsigned int message_size, char* ack, unsigned int ack_size);
 uint8_t scan_and_choose_channel(RF24& nrf24);
 bool wait_qb_update();
 void qb_stat_view();
@@ -37,27 +38,34 @@ bool get_gps_info(uint16_t max_wait_time_ms);
 void set_timer4_count_ms(uint16_t time_ms, uint16_t& steps);
 bool sync_to_mg();
 bool sync_qb_mg();
+bool full_update_to_mg(uint8_t qb_num);
 bool update_to_mg(uint8_t qb_num);
 
 uint8_t pipe0;
+bool scanned_nrf24_channel = false;
+bool update_gps = false;
+bool check_time = false;
+uint8_t timer_counter = 0;
 
 enum QUARANTINE_BAND_STATUS {
   NOT_INIT  = 0,
   PRESENT   = 1,
   OPENED    = 2,
   MISSING   = 3,
-  EMERGENCY = 4
+  EMERGENCY = 4,
+  MOVED     = 5
 };
 
 enum E22_MESSAGE_TYPE {
   REQUEST_E22_ADDR        = 0,
   REQUEST_MEM_ADDR        = 1,
-  UPDATE_INFO             = 2,
+  FULL_UPDATE_INFO        = 2,
+  UPDATE_INFO             = 3,
 
-  RETURN_E22_ADDR         = 3,
-  RETURN_MEM_ADDR         = 4,
+  RETURN_E22_ADDR         = 4,
+  RETURN_MEM_ADDR         = 5,
 
-  ACK                     = 5
+  ACK                     = 6
 };
 
 enum E22_ACK_PAYLOAD {
@@ -70,18 +78,89 @@ enum CRC_LENGTH {
   CRC_16  = 1,
 };
 
-struct e22_message_header{  //11 bytes
+struct e22_message_header{  //10bytes
   uint8_t message_type;
   uint8_t sender_e22_addr_h;
   uint8_t sender_e22_addr_l;
   uint8_t ack_payload;
   uint8_t sender_sequence;
   uint8_t receiver_sequence;
-  uint8_t crc_length;
   uint16_t crc_poly;
+  uint8_t crc_length;
+  uint8_t padding;    //padding for similar alignment between arduino and esp8266
+  uint8_t padding1;    //padding for similar alignment between arduino and esp8266
+  uint8_t padding2;    //padding for similar alignment between arduino and esp8266
 };
 
+struct ig_sync_message{   //16bytes
+  e22_message_header ig_header;
+  
+  uint8_t padding;    //padding for similar alignment between arduino and esp8266
+  uint8_t padding1;    //padding for similar alignment between arduino and esp8266
+  uint8_t padding2;    //padding for similar alignment between arduino and esp8266
 
+  uint8_t crc;
+};
+
+struct ig_ack_message{    //16bytes
+  e22_message_header ig_ack_header;
+
+  uint8_t padding;    //padding for similar alignment between arduino and esp8266
+  uint8_t padding1;    //padding for similar alignment between arduino and esp8266
+  uint8_t padding2;    //padding for similar alignment between arduino and esp8266
+
+  uint8_t crc;
+};
+
+struct ig_full_message{   //40bytes
+  e22_message_header ig_header;
+  uint32_t qb_addr;
+  uint16_t mg_mem_addr;
+  uint8_t padding;    //padding for similar alignment between arduino and esp8266
+  uint8_t padding1;    //padding for similar alignment between arduino and esp8266
+  float initial_latitude;
+  float initial_longitude;
+  uint32_t ic;
+  uint32_t hp_num;
+  uint8_t status;
+  uint8_t padding2;    //padding for similar alignment between arduino and esp8266
+
+  uint16_t crc;
+};
+
+struct ig_update_message{   //28bytes 
+  e22_message_header ig_header;
+  uint16_t mg_mem_addr;
+  uint8_t padding;    //padding for similar alignment between arduino and esp8266
+  uint8_t padding1;    //padding for similar alignment between arduino and esp8266
+  float current_latitude;
+  float current_longitude;
+  uint8_t status;
+  uint8_t padding2;    //padding for similar alignment between arduino and esp8266
+
+  uint16_t crc;
+};
+
+struct mg_sync_message{
+  e22_message_header mg_header;
+
+  uint8_t ig_e22_addr_h;
+  uint8_t ig_e22_addr_l;
+
+  uint8_t padding;    //padding for similar alignment between arduino and esp8266
+
+  uint8_t crc;
+};
+
+struct mg_sync_message_qb_mem{
+  e22_message_header mg_header;
+
+  uint16_t qb_mem_addr;
+
+  uint8_t padding;    //padding for similar alignment between arduino and esp8266
+
+  uint8_t crc;
+};
 
 struct user {
   uint16_t mg_mem_addr;
@@ -91,6 +170,7 @@ struct user {
   uint8_t time_h;
   uint8_t time_m;
   uint32_t ic;
+  uint32_t hp_num;
   uint8_t status;
 
   uint32_t qb_addr;
@@ -99,15 +179,15 @@ struct user {
 
 struct intermediate_gateway {
   MyString my_password = "1234";
-  
-  uint32_t my_nrf24_addr = random(1, 0x7FFFFFFE);       //MSbit must be 0 for random() to work with 32bits
+
+  uint32_t my_nrf24_addr;
   uint8_t my_nrf24_channel;
 
   uint8_t current_qb_number = 0;
 
   bool sync_to_mg = 0;
-  uint8_t my_e22_addr_h = random(0,pow(2,8)-2);     //avoid 0xFF (0xFF and 0 for monitor mode)
-  uint8_t my_e22_addr_l = random(1,pow(2,8)-1);     //avoid 0 
+  uint8_t my_e22_addr_h;
+  uint8_t my_e22_addr_l;
   uint8_t e22_channel = 70;     //920.125 MHz
   uint8_t e22_crypt_h = 0xAB;   //used for encryption and decryption
   uint8_t e22_crypt_l = 0xAB;
@@ -117,8 +197,12 @@ struct intermediate_gateway {
   uint16_t date_yyyy;
   uint8_t time_h;
   uint8_t time_m;
-  long latitude;
-  long longitude;
+
+  double initial_latitude;
+  double initial_longitude;
+
+  double latitude;
+  double longitude;
 }ig;
 
 struct main_gateway {
@@ -148,12 +232,12 @@ byte colPins[COLS] = {39, 37, 35, 33}; //connect to the column pinouts of the ke
 //initialize an instance of class NewKeypad
 Keypad customKeypad = Keypad( makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS); 
 
-static const uint32_t GPSBaud = 4800;
+static const uint32_t GPSBaud = 9600;
 
 // The TinyGPS++ object
 TinyGPSPlus gps;
 
-MyLoRa_E22 e22(26, 28, 30, 22, 24);    // Arduino RX <-- e22 TX, Arduino TX --> e22 RX AUX M0 M1
+MyLoRa_E22 e22(&Serial3, 26, 22, 24);    // Arduino RX <-- e22 TX, Arduino TX --> e22 RX AUX M0 M1
 
 void setup(){
   lcd.init();                      // initialize the lcd 
@@ -165,7 +249,7 @@ void setup(){
   lcd.setCursor(0,1);
   lcd.print(F("Serial ..."));
 
-  Serial.begin(115200);   //for debugging
+  Serial.begin(9600);   //for debugging
   while (!Serial) {
     // some boards need to wait to ensure access to serial over USB
   }
@@ -187,12 +271,32 @@ void setup(){
   e22.begin();    //init e22 lora module
   delay(500);
 
+  randomSeed(analogRead(A0));       //read floting pin and use as random seed
+  ig.my_nrf24_addr = random(1, 0x7FFFFFFE);       //MSbit must be 0 for random() to work with 32bits
+  ig.my_e22_addr_h = random(0,pow(2,8)-2);     //avoid 0xFF (0xFF and 0 for monitor mode)
+  ig.my_e22_addr_l = random(1,pow(2,8)-1);     //avoid 0 
+
+  if(!e22.set_e22_configuration(ig.my_e22_addr_h, ig.my_e22_addr_l, ig.e22_channel, true, POWER_21, 
+    AIR_DATA_RATE_000_03, ig.e22_crypt_h, ig.e22_crypt_l, false)) {
+    lcd.clear();
+    lcd.print(F("E22 Error"));
+    lcd.setCursor(0,1);
+    lcd.print(F("check wiring"));
+    while(1);
+  }
+
+  #ifdef DEBUG
+    Serial.print(F("ig_e22_addr: "));
+    Serial.print(ig.my_e22_addr_h,16);
+    Serial.println(ig.my_e22_addr_l, 16);
+  #endif
+
   lcd.clear();
   lcd.print(F("Generating"));
   lcd.setCursor(0,1);
   lcd.print(F("random qb addr"));
 
-  randomSeed(analogRead(A0));       //read floting pin
+  randomSeed(analogRead(A0));       //read floting pin and use as random seed
   person[0].qb_addr = random(1, 0x7FFFFFFE);    //MSbit must be zero for random to function correctly
   #ifdef DEBUG
       Serial.print(F("qb"));
@@ -203,7 +307,7 @@ void setup(){
   delay(200);     //
   for(int i = 1; i < 10; i++) {
     Reassign:
-    randomSeed(analogRead(A0));
+    randomSeed(analogRead(A0));   //read floting pin and use as random seed
     person[i].qb_addr = random(1, 0x7FFFFFFE);    //MSbit must be 0 for random() to work
     #ifdef DEBUG
       Serial.print(F("qb"));
@@ -233,11 +337,68 @@ void setup(){
   }
 
   lcd.clear();
-  lcd.print(F("IG Main Menu"));
+  lcd.print(F("Waiting GPS"));
+  lcd.setCursor(0,1);
+  lcd.print(F("signal..."));
+  delay(1000);
+
+  Wait_GPS_Ready:
+  while(!get_gps_info(500));
+  ig.initial_latitude = ig.latitude;
+  ig.initial_longitude = ig.initial_longitude;
+
+  if(ig.initial_latitude==0 || ig.initial_longitude==0) {
+    #ifdef DEBUG
+      Serial.print(F("initial location = "));
+      Serial.print(ig.initial_latitude,6);
+      Serial.print(F(", "));
+      Serial.println(ig.initial_longitude, 6);
+      Serial.print(F("time = "));
+      Serial.print(ig.time_h,10);
+      Serial.print(F(":"));
+      Serial.println(ig.time_m, 10);
+    #endif
+    delay(1000);
+    //goto Wait_GPS_Ready;
+  }
+
+  #ifdef DEBUG
+    Serial.print(F("initial location = "));
+    Serial.print(ig.initial_latitude,6);
+    Serial.print(F(","));
+    Serial.println(ig.initial_longitude, 6);
+  #endif
+
+  lcd.clear();
+  lcd.print(F("GPS ready"));
+
+  delay(1000);
+  lcd.clear();
+  lcd.print(F("F1: Admin mode1"));
+  lcd.setCursor(0,1);
+  lcd.print(F("F2: Admin mode2"));
+
+  TCCR5A = 0;
+  TCCR5B = 0;
+  TCCR5B |= (1 << CS12) | (1 << CS10);  // Set CS12 and CS10 bits for 1024 prescaler
+  TIMSK5 |= (1<<TOIE5);     //enable overflow interrupt, will overflow every 4.2s
+  TCNT5 = 0;
+  sei();    //set interrupt
 }
   
 void loop(){
-  
+  if(update_gps) {
+    update_gps = false;
+    get_gps_info(100);
+    // 0.001 approximate to 111 m on equator
+    if((((ig.current_qb_number && ig.latitude-ig.initial_latitude)>0.001) || ((ig.longitude-ig.initial_longitude)>0.001))) {
+      for(int i = ig.current_qb_number; i >= 0; i--) {
+        person[i].status = MOVED;
+        update_to_mg(i);
+      }
+    }
+  }
+
   if (nrf24.available(&pipe0)) {             // check for all rx pipe and return pipe number if data available
     uint8_t qb_num = update_qb_info();     //update qb status and time according to data received
     update_to_mg(qb_num);
@@ -261,6 +422,24 @@ void loop(){
       default:
       {
         break;
+      }
+    }
+  }
+
+  if(check_time) {
+    check_time = false;
+    get_gps_info(100);
+    if(ig.current_qb_number) {
+      int8_t current_minute = ig.time_m;
+      int8_t current_hour = ig.time_h;
+      for(int i = ig.current_qb_number; i>=0; i--) {
+        if(current_hour != person[i].time_h) {
+          current_minute += 60;
+        }
+        if((current_minute - person[i].time_m)>10) {
+          person[i].status = MISSING;
+          update_to_mg(i);
+        }
       }
     }
   }
@@ -395,10 +574,30 @@ void admin_mode1() {
   switch (selection)
   {
     case '1':
-    {
+    { 
+      if(scanned_nrf24_channel) {
+        lcd.clear();
+        lcd.print(F("Already scanned"));
+        lcd.setCursor(0,1);
+        lcd.print(F("NRF24 channel"));
+        delay(1000);
+        goto Select_mode_1;
+      }
+      lcd.clear();
+      lcd.print(F("Scanning for"));
+      lcd.setCursor(0,1);
+      lcd.print(F("light channel"));
+
       uint8_t channel = scan_and_choose_channel(nrf24);
       if(channel != -1) {
         ig.my_nrf24_channel = channel;
+        #ifdef DEBUG
+          Serial.print(F("ig.my_nrf24_channel = "));
+          Serial.println(ig.my_nrf24_channel);
+          Serial.print(F("Channel Frequency = "));
+          Serial.print(2400 + ig.my_nrf24_channel);
+          Serial.println(F(" MHz"));
+        #endif
 
         nrf24.setPALevel(RF24_PA_MAX);      //set max signal amplification
         nrf24.setCRCLength(RF24_CRC_8);     //set 8 bit crc
@@ -406,13 +605,20 @@ void admin_mode1() {
         nrf24.setAutoAck(true);       //enable auto acknoledgement
         nrf24.setChannel(channel);      //set channel
         nrf24.setAddressWidth(4);        //set addr width
+
         nrf24.openReadingPipe(0, ig.my_nrf24_addr);     //set receiving addr
+        #ifdef DEBUG
+          Serial.print(F("ig.my_nrf24_addr = "));
+          Serial.println(ig.my_nrf24_addr, 16);
+        #endif
+
         nrf24.startListening();     //start receiving
 
         lcd.clear();
         lcd.print(F("Set Channel"));
         lcd.setCursor(0,1);
         lcd.print(F("Success"));
+        scanned_nrf24_channel = true;
         delay(1000);
         goto Select_mode_1;
       }
@@ -429,25 +635,24 @@ void admin_mode1() {
     case '2':
     {
       if(!ig.sync_to_mg) {
-        if(e22.set_e22_configuration(ig.my_e22_addr_h, ig.my_e22_addr_l, ig.e22_channel, true, POWER_21, 
-        AIR_DATA_RATE_000_03, ig.e22_crypt_h, ig.e22_crypt_l, false)) {
-          if(sync_to_mg()) {
-            ig.sync_to_mg = true;
-            goto Select_mode_1;
-          }
-          else {
-            goto Select_mode_1;
-          }
+        lcd.clear();
+        lcd.print(F("Sending Sync"));
+        lcd.setCursor(0,1);
+        lcd.print(F("message to MG"));
+        if(sync_to_mg()) {
+          ig.sync_to_mg = true;
+          goto Select_mode_1;
         }
         else {
           lcd.clear();
-          lcd.print(F("IG-MG Sync"));
+          lcd.print(F("Sync to MG"));
           lcd.setCursor(0,1);
           lcd.print(F("Failed"));
           delay(1000);
           goto Select_mode_1;
         }
       }
+      
       else {
         lcd.clear();
         lcd.print(F("IG-MG Sync"));
@@ -560,7 +765,27 @@ void admin_mode2() {
     
     case '2':
     {
-      new_qb_sync();
+      if(new_qb_sync()){
+        lcd.clear();
+        lcd.print(F("QB Sync"));
+        lcd.setCursor(0,1);
+        lcd.print(F("Completed"));
+        #ifdef DEBUG
+          Serial.print(F("QB Sync Completed"));
+        #endif
+        delay(1000);
+      }
+
+      else{
+        lcd.clear();
+        lcd.print(F("QB Sync"));
+        lcd.setCursor(0,1);
+        lcd.print(F("Failed"));
+        #ifdef DEBUG
+          Serial.print(F("QB Sync Failed"));
+        #endif
+        delay(1000);
+      }
       goto Select_mode_2;
     }
 
@@ -604,10 +829,21 @@ void admin_mode2() {
 
     case '6':
     {
-      if(send_to_qb(300, "update", "start")) {
+      char message[] = "update";
+      char ack[] = "start";
+      if(send_to_qb(300, message, sizeof(message)-1, ack, (sizeof(ack)-1))) {
+        lcd.clear();
+        lcd.print(F("Waiting QB send"));
+        lcd.setCursor(0,1);
+        lcd.print(F("data..."));
+
+        #ifdef DEBUG
+          Serial.println(F("Waiting QB send data..."));
+        #endif
+
         if(wait_qb_update()) {
           uint8_t qb_num = update_qb_info();
-          update_to_mg(qb_num);
+          full_update_to_mg(qb_num);
         }
       }
       goto Select_mode_2;
@@ -653,13 +889,25 @@ bool new_qb_sync() {
 
   uint8_t count = 0;
 
+  char message[] = "connect";
+  char ack[] = "connected";
+
   Retransmission:
-  bool connection = send_to_qb(500, "connect", "connected");       ///here
+  #ifdef DEBUG
+    Serial.print(F("Sending: "));
+    Serial.println(message);
+  #endif
+  bool connection = send_to_qb(500, message, sizeof(message), ack, sizeof(ack));       ///here
   if(connection) {
+    delay(100);
     lcd.clear();
     lcd.print(F("QB Connection"));
     lcd.setCursor(0,1);
     lcd.print(F("Success"));
+
+    #ifdef DEBUG
+      Serial.println(F("QB connnection Success"));
+    #endif
     delay(1000);
 
     lcd.clear();
@@ -667,28 +915,44 @@ bool new_qb_sync() {
     lcd.setCursor(0,1);
     lcd.print(F(",addr & usr num"));
 
-    String combined_str = String(ig.my_nrf24_channel,16);   ///testing
-    String temp_str = String(ig.my_nrf24_addr,16);
-    combined_str.concat(temp_str);
-    temp_str = String(person[ig.current_qb_number].qb_addr,16);
-    combined_str.concat(temp_str);
-    temp_str = String(ig.current_qb_number, 16); 
-    combined_str.concat(temp_str);
-    
-    bool qb_sync = send_to_qb(500, combined_str, combined_str);   //send channel & user number
+    delay(1000);
+
+    struct qb_sync_message {
+      uint8_t ig_channel = ig.my_nrf24_channel;
+      uint32_t ig_addr = ig.my_nrf24_addr;
+      uint32_t qb_addr = person[ig.current_qb_number].qb_addr;
+      uint8_t qb_num = ig.current_qb_number;
+    }qb_sync_info;
+
+    #ifdef DEBUG
+      Serial.println(F("Sending: "));
+      Serial.print(F("ig_channel = "));
+      Serial.println(qb_sync_info.ig_channel);
+      Serial.print(F("ig_addr = "));
+      Serial.println(qb_sync_info.ig_addr, 16);
+      Serial.print(F("qb_addr = "));
+      Serial.println(qb_sync_info.qb_addr, 16);
+      Serial.print(F("qb_num = "));
+      Serial.println(qb_sync_info.qb_num);
+    #endif
+    bool qb_sync = send_to_qb(500, reinterpret_cast<char*>(&qb_sync_info), sizeof(qb_sync_info), \
+                    reinterpret_cast<char*>(&qb_sync_info), sizeof(qb_sync_info));   //send channel, addr, & user number
     
     if(qb_sync){
       lcd.clear();
-      lcd.print(F("Waiting QB"));
+      lcd.print(F("Waiting QB send"));
       lcd.setCursor(0,1);
-      lcd.print(F("transmission"));
-      delay(500);
+      lcd.print(F("data..."));
+      
+      #ifdef DEBUG
+        Serial.println(F("Waiting QB send data..."));
+      #endif
 
       if(wait_qb_update()) {
         return true;
       }
       else {
-        return false;
+        goto QB_connection_failed;
       }
     }
     else {
@@ -698,15 +962,11 @@ bool new_qb_sync() {
   else {
     count++;
     if(count<5){
+      delay(100);
       goto Retransmission;
     }
     else {
       QB_connection_failed:
-      lcd.clear();
-      lcd.print(F("QB Sync"));
-      lcd.setCursor(0,1);
-      lcd.print(F("Failed"));
-      delay(1000);
       return false;
     }
   }
@@ -716,22 +976,30 @@ void qb_setting() {
   lcd.clear();
   lcd.print(F("Enter IC No.:"));
   lcd.setCursor(0,1);
-  String ic_str = keypad_input();
-  char *ic = reinterpret_cast<char *> (&ic_str);    ///testing
+  String input_str = keypad_input();
+  char* ic = input_str.begin();    ///testing
   person[ig.current_qb_number].ic = atoi(ic);   
+
+  lcd.clear();
+  lcd.print(F("Enter H/P No.:"));
+  lcd.setCursor(0,1);
+  input_str = keypad_input();
+  char* hp = input_str.begin();
+  person[ig.current_qb_number].hp_num = atoi(hp+2);  
 
   lcd.clear();
   lcd.print(F("Done QB setting"));
   delay(1000);
 }
 
-bool send_to_qb(uint32_t max_time_ms, String message, String ack) {
+bool send_to_qb(uint32_t max_time_ms, char* message, unsigned int message_size, char* ack, unsigned int ack_size) {
   // initialize timer4 
   uint16_t steps;
   set_timer4_count_ms(max_time_ms, steps);
 
   bool ack_timeout = 0;
-  Serial1.print(message);
+
+  Serial1.write(message, message_size);
   
   while(Serial1.available()<=0) {
     uint16_t current = TCNT4;
@@ -745,15 +1013,25 @@ bool send_to_qb(uint32_t max_time_ms, String message, String ack) {
     lcd.print(F("Ack timeout"));
     lcd.setCursor(0,1);
     lcd.print(F("Try again"));
+
+    #ifdef DEBUG
+      Serial.print(F("Ack timeout, try again"));
+    #endif
     delay(500);
     return false;
   }
 
-  String incoming = Serial1.readString();
-  if(incoming == ack) {
+  char* incoming_ack = (char*)malloc(ack_size);
+  Serial1.readBytes(incoming_ack, ack_size);
+
+  if(strncmp(incoming_ack, ack, ack_size) == 0) {
     lcd.clear();
     lcd.print(F("Ack Received"));
+    #ifdef DEBUG
+      Serial.println(F("Ack Received"));
+    #endif
     delay(1000);
+    free(incoming_ack);
     return true;
   }
   else {
@@ -762,20 +1040,22 @@ bool send_to_qb(uint32_t max_time_ms, String message, String ack) {
     lcd.setCursor(0,1);
     lcd.print(F("Try again"));
     delay(500);
+    #ifdef DEBUG
+      Serial.print(F("Wrong Ack, try again"));
+    #endif
+    free(incoming_ack);
     return false;
   }
 }
 
 uint8_t scan_and_choose_channel(RF24& nrf24) {
   //scan for channel with low interference
+  nrf24.setPALevel(RF24_PA_MAX);      //set max signal amplification
   nrf24.setAutoAck(false);
-  nrf24.stopListening();    //standby mode
-  #ifdef DEBUG
-  nrf24.printDetails();   //print nrf24 details to UART0 terminal
-  #endif  
+  nrf24.stopListening();    //standby mode 
 
   const uint8_t num_channels = 100;
-  const int scan_time_ms = 300;
+  const unsigned int scan_time_ms = 1000;
   
   uint8_t i = num_channels;
   while (i--)
@@ -785,7 +1065,7 @@ uint8_t scan_and_choose_channel(RF24& nrf24) {
 
     // Listen for a little
     nrf24.startListening();
-    delayMicroseconds(scan_time_ms);    //scan for 300ms
+    delay(scan_time_ms);    //scan for 300ms
     nrf24.stopListening();
 
     // Did we get a carrier?
@@ -798,36 +1078,26 @@ uint8_t scan_and_choose_channel(RF24& nrf24) {
 
 ///here
 bool wait_qb_update() {
-  uint8_t count = 0;
-  const int max_wait_count = 5;
+	uint16_t steps;
+	// initialize timer4 
+	set_timer4_count_ms(5000, steps);
 
-  Continue_waiting:
-  uint8_t pipe;
-  if (nrf24.available(&pipe)) {             // check for all rx pipe and return pipe number if data available
-    update_qb_info();     //update qb status and time according to data received
+	TCNT4 = 0;
+	
+	uint8_t pipe;
+	while(!nrf24.available(&pipe)){
+		uint16_t current = TCNT4;
+		if(current >= steps) {
+			return false;
+		}
+	}
 
-    lcd.clear();
-    lcd.print(F("QB Sync"));
-    lcd.setCursor(0,1);
-    lcd.print(F("Success"));
-    delay(1000);
-    return true;
-  }
-  else {
-    if(count<max_wait_count){
-      count = count + 1;
-      delay(300);
-      goto Continue_waiting;  ///here
-    }
-    else {
-      lcd.clear();
-      lcd.print(F("QB Sync"));
-      lcd.setCursor(0,1);
-      lcd.print(F("Failed"));
-      delay(1000);
-      return false;
-    }
-  }
+  #ifdef DEBUG
+    Serial.println(F("Received update from QB"));
+  #endif
+
+	update_qb_info();     //update qb status and time according to data received
+	return true;
 }
 
 void qb_stat_view() {
@@ -914,10 +1184,11 @@ void qb_stat_view() {
 
 uint8_t update_qb_info() {
   uint8_t bytes = nrf24.getPayloadSize(); // get the size of the payload
-  uint16_t received = 0;
-  nrf24.read(&received, bytes);            // fetch payload from FIFO
-  uint8_t qb_id = (received & 0xF0)>>8;    //extract qb_id
-  person[qb_id].status = received & 0x0F;   //extract status
+  uint8_t* received = (uint8_t*)malloc(2);
+  nrf24.read(received, bytes);            // fetch payload from FIFO
+
+  uint8_t qb_id = *received;    //extract qb_id
+  person[qb_id].status = *(received-1);   //extract status
 
   person[qb_id].time_h = gps.time.hour();     //save incomming time
   person[qb_id].time_m = gps.time.minute();
@@ -925,14 +1196,57 @@ uint8_t update_qb_info() {
   person[qb_id].date_mm = gps.date.month();
   person[qb_id].date_yyyy = gps.date.year();
 
+  #ifdef DEBUG
+    Serial.println(F("QB info updated:"));
+    Serial.print(F("QB ID: "));
+    Serial.println(qb_id);
+    Serial.print(F("QB status: "));
+    switch (person[qb_id].status)
+    {
+      case NOT_INIT:
+      {
+        Serial.println(F("NOT_INIT"));
+        break;
+      }
+      
+      case PRESENT:
+      {
+        Serial.println(F("PRESENT"));
+        break;
+      }
+
+      case OPENED:
+      {
+        Serial.println(F("OPENED"));
+        break;
+      }
+
+      case MISSING:
+      {
+        Serial.println(F("MISSING"));
+        break;
+      }
+
+      case EMERGENCY:
+      {
+        Serial.println(F("EMERGENCY"));
+        break;
+      }
+
+      default:
+      {
+        Serial.println(F("ERROR"));
+        break;
+      }
+    }
+  #endif
+
+  free(received);
   return qb_id;
 }
 
 bool sync_to_mg() {
-  struct IG_Message{
-    e22_message_header ig_header;
-    uint8_t crc;
-  } ig_to_mg;
+  ig_sync_message ig_to_mg;
 
   ig_to_mg.ig_header.message_type = REQUEST_E22_ADDR;
   ig_to_mg.ig_header.ack_payload = ACK_PAYLOAD;
@@ -943,19 +1257,21 @@ bool sync_to_mg() {
   ig_to_mg.ig_header.crc_length = CRC_8;
   ig_to_mg.ig_header.crc_poly = MY_CRC8_POLY;
 
-
-  ig_to_mg.crc = crc8(reinterpret_cast<uint8_t*>(&ig_to_mg), sizeof(IG_Message)-1, ig_to_mg.ig_header.crc_poly);
+  ig_to_mg.crc = crc8(reinterpret_cast<uint8_t*>(&ig_to_mg), sizeof(ig_sync_message)-1, ig_to_mg.ig_header.crc_poly);
 
   char* msg_str = reinterpret_cast<char*>(&ig_to_mg);
 
   uint8_t retry = 0;
-  uint16_t steps;
-  // initialize timer4 
-  set_timer4_count_ms(3000, steps);
+  unsigned long max_wait_millis = 10000;    //max wait for 3s
+  unsigned long start_millis;
+  unsigned long current_millis;
 
   Retry:
-  TCNT4 = 0;
-  ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_to_mg));    //boardcast
+  #ifdef DEBUG
+    Serial.println(F("sending REQUEST_E22_ADDR message"));
+  #endif
+  
+  ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_sync_message));    //boardcast
   if(rs.code!=1) {
     lcd.clear();
     lcd.print(F("Sync to MG"));
@@ -964,9 +1280,14 @@ bool sync_to_mg() {
     delay(1000);
     return false;
   }
+  start_millis = millis();
+
+  #ifdef DEBUG
+      Serial.println(F("Waiting response"));
+    #endif
   while(e22.available()<=1) {
-    uint16_t current = TCNT4;
-    if(current >= steps) {
+    current_millis = millis();
+    if(current_millis - start_millis >= max_wait_millis) {
       if(retry<10) {
         retry++;    
         delay(random(0,pow(2,retry)*5));    //random delay if collision happens (0 to 5ms * 2^retry)
@@ -982,19 +1303,18 @@ bool sync_to_mg() {
       }
     }
   }
-  //e22.avalable
-  struct mg_message{
-    e22_message_header mg_header;
 
-    uint8_t ig_e22_addr_h;
-    uint8_t ig_e22_addr_l;
-    uint8_t crc;
-  };
-  ResponseStructContainer rsc = e22.receiveMessage(sizeof(mg_message));
+  #ifdef DEBUG
+    Serial.println(F("Received response"));
+  #endif
+  //e22.avalable
+  mg_sync_message mg_to_ig;
+  ResponseStructContainer rsc = e22.receiveMessage(sizeof(mg_sync_message));   ///debugging here
   if (rsc.status.code!=1){
-    return false;
+    retry++;
+    goto Retry;
   }
-  mg_message mg_to_ig = *(mg_message*)rsc.data;
+  mg_to_ig = *(mg_sync_message*)rsc.data;
   if((mg_to_ig.mg_header.message_type != RETURN_E22_ADDR) || (mg_to_ig.mg_header.ack_payload != ACK_PAYLOAD)
   || (mg_to_ig.mg_header.sender_sequence != ig_to_mg.ig_header.receiver_sequence) 
   || (mg_to_ig.mg_header.receiver_sequence != (ig_to_mg.ig_header.sender_sequence ^ 0x01))
@@ -1002,7 +1322,7 @@ bool sync_to_mg() {
     retry++;
     goto Retry;
   }
-  uint8_t crc = crc8(reinterpret_cast<uint8_t*>(&mg_to_ig), sizeof(mg_message)-1, mg_to_ig.mg_header.crc_poly);
+  uint8_t crc = crc8(reinterpret_cast<uint8_t*>(&mg_to_ig), sizeof(mg_sync_message)-1, mg_to_ig.mg_header.crc_poly);
   if(crc != mg_to_ig.crc) {
     retry++;
     goto Retry;
@@ -1019,32 +1339,43 @@ bool sync_to_mg() {
       lcd.setCursor(0,1);
       lcd.print(F("Success"));
 
-      ig_to_mg.ig_header.sender_sequence ^= 1;
-      ig_to_mg.ig_header.receiver_sequence ^= 1;
+      #ifdef DEBUG
+        Serial.println(F("Sync to MG Success"));
+        Serial.print(F("MG E22 addr = "));
+        Serial.print(mg.mg_e22_addr_h, 16);
+        Serial.println(mg.mg_e22_addr_l, 16);
+      #endif
 
-      struct ig_ack_message{
-        e22_message_header ig_ack_header;
-        uint8_t crc;
-      } ig_ack;
+      ig_ack_message ig_ack;
 
-      ig_ack.ig_ack_header.sender_sequence = ig_to_mg.ig_header.sender_sequence ^ 1;
-      ig_ack.ig_ack_header.receiver_sequence = ig_to_mg.ig_header.receiver_sequence ^ 1;
+      
       
       ig_ack.ig_ack_header.message_type = ACK;
       ig_ack.ig_ack_header.ack_payload = ACK_ONLY;
       ig_ack.ig_ack_header.sender_e22_addr_h = ig.my_e22_addr_h;
       ig_ack.ig_ack_header.sender_e22_addr_l = ig.my_e22_addr_l;
-      ig_ack.ig_ack_header.sender_sequence = 0;
-      ig_ack.ig_ack_header.receiver_sequence = 0;
+      ig_ack.ig_ack_header.sender_sequence = ig_to_mg.ig_header.sender_sequence ^ 1;
+      ig_ack.ig_ack_header.receiver_sequence = ig_to_mg.ig_header.receiver_sequence ^ 1;
       ig_ack.ig_ack_header.crc_length = CRC_8;
       ig_ack.ig_ack_header.crc_poly = MY_CRC8_POLY;
 
       ig_ack.crc = crc8(reinterpret_cast<uint8_t*>(&ig_ack), sizeof(ig_ack_message)-1, ig_ack.ig_ack_header.crc_poly);
 
+      msg_str = reinterpret_cast<char*>(&ig_ack);
+
+      #ifdef DEBUG
+        Serial.println(F("Sending ack message to MG"));
+      #endif
       //send ack message 3 times, no need to wait response
-      for(int i = 0; i<3; i++) {
-        e22.sendFixedMessage(mg.mg_e22_addr_h, mg.mg_e22_addr_l, ig.e22_channel, msg_str, sizeof(ig_to_mg));    //boardcast
+      for(int i = 0; i<5; i++) {
+        e22.sendFixedMessage(mg.mg_e22_addr_h, mg.mg_e22_addr_l, ig.e22_channel, msg_str, sizeof(ig_ack_message));
+        delay(3000);
+        randomSeed(analogRead(A0));
+        delay(random(3000));
       }
+      #ifdef DEBUG
+        Serial.println(F("Sync to MG completed"));
+      #endif
       lcd.clear();
       lcd.print(F("Sync to MG"));
       lcd.setCursor(0,1);
@@ -1068,22 +1399,26 @@ bool get_gps_info(uint16_t max_wait_time_ms) {
   set_timer4_count_ms(max_wait_time_ms, steps);
   while (Serial2.available() <= 0) {
     uint16_t current = TCNT4;
-    if(current>=steps) {
+    if(current>=steps) { 
       return false;
     }
   }
-  if(gps.encode(Serial2.read())) {
-    ig.date_dd = gps.date.day();
-    ig.date_mm = gps.date.month();
-    ig.date_yyyy = gps.date.year();
 
-    ig.time_h = gps.time.hour();
-    ig.time_m = gps.time.minute();
-    return true;
-  }
-  else {
+  if(!gps.encode(Serial2.read())){
     return false;
   }
+    
+  ig.date_dd = gps.date.day();
+  ig.date_mm = gps.date.month();
+  ig.date_yyyy = gps.date.year();
+
+  ig.time_h = gps.time.hour();
+  ig.time_m = gps.time.minute();
+
+  ig.longitude = gps.location.lng();
+  ig.latitude = gps.location.lat();
+  return true;
+
 }
 
 void set_timer4_count_ms(uint16_t time_ms, uint16_t& steps) {
@@ -1095,10 +1430,7 @@ void set_timer4_count_ms(uint16_t time_ms, uint16_t& steps) {
 }
 
 bool sync_qb_mg() {
-  struct IG_Message{
-    e22_message_header ig_header;
-    uint8_t crc;
-  } ig_to_mg;
+  ig_sync_message ig_to_mg;
 
   ig_to_mg.ig_header.message_type = REQUEST_MEM_ADDR;
   ig_to_mg.ig_header.ack_payload = ACK_PAYLOAD;
@@ -1109,7 +1441,7 @@ bool sync_qb_mg() {
   ig_to_mg.ig_header.crc_length = CRC_8;
   ig_to_mg.ig_header.crc_poly = MY_CRC8_POLY;
 
-  ig_to_mg.crc = crc8(reinterpret_cast<uint8_t*>(&ig_to_mg), sizeof(IG_Message)-1, ig_to_mg.ig_header.crc_poly);
+  ig_to_mg.crc = crc8(reinterpret_cast<uint8_t*>(&ig_to_mg), sizeof(ig_sync_message)-1, ig_to_mg.ig_header.crc_poly);
 
   char* msg_str = reinterpret_cast<char*>(&ig_to_mg);
 
@@ -1120,7 +1452,7 @@ bool sync_qb_mg() {
 
   Retry:
   TCNT4 = 0;
-  ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_to_mg));    //boardcast
+  ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_sync_message));    //boardcast
   if(rs.code!=1) {
     lcd.clear();
     lcd.print(F("Sync QB MG"));
@@ -1148,18 +1480,12 @@ bool sync_qb_mg() {
     }
   }
   //e22.avalable
-  struct mg_message{
-    e22_message_header mg_header;
-
-    uint16_t qb_mem_addr;
-
-    uint8_t crc;
-  };
-  ResponseStructContainer rsc = e22.receiveMessage(sizeof(mg_message));
+  mg_sync_message_qb_mem mg_to_ig;
+  ResponseStructContainer rsc = e22.receiveMessage(sizeof(mg_sync_message_qb_mem));
   if (rsc.status.code!=1){
     return false;
   }
-  mg_message mg_to_ig = *(mg_message*)rsc.data;
+  mg_to_ig = *(mg_sync_message_qb_mem*)rsc.data;
   if((mg_to_ig.mg_header.message_type != RETURN_MEM_ADDR) || (mg_to_ig.mg_header.ack_payload != ACK_PAYLOAD)
   || (mg_to_ig.mg_header.sender_sequence != ig_to_mg.ig_header.receiver_sequence) 
   || (mg_to_ig.mg_header.receiver_sequence != (ig_to_mg.ig_header.sender_sequence ^ 0x01))
@@ -1167,7 +1493,7 @@ bool sync_qb_mg() {
     retry++;
     goto Retry;
   }
-  uint8_t crc = crc8(reinterpret_cast<uint8_t*>(&mg_to_ig), sizeof(mg_message)-1, mg_to_ig.mg_header.crc_poly);
+  uint8_t crc = crc8(reinterpret_cast<uint8_t*>(&mg_to_ig), sizeof(mg_sync_message_qb_mem)-1, mg_to_ig.mg_header.crc_poly);
   if(crc != mg_to_ig.crc) {
     retry++;
     goto Retry;
@@ -1175,27 +1501,27 @@ bool sync_qb_mg() {
   else {
     person[ig.current_qb_number].mg_mem_addr = mg_to_ig.qb_mem_addr;
 
-    struct ig_ack_message{
-      e22_message_header ig_ack_header;
-      uint8_t crc;
-    } ig_ack;
+    ig_ack_message ig_ack;
 
     ig_ack.ig_ack_header.message_type = ACK;
     ig_ack.ig_ack_header.ack_payload = ACK_ONLY;
     ig_ack.ig_ack_header.sender_e22_addr_h = ig.my_e22_addr_h;
     ig_ack.ig_ack_header.sender_e22_addr_l = ig.my_e22_addr_l;
 
-    ig_ack.ig_ack_header.sender_sequence = ig_to_mg.ig_header.sender_sequence ^ 1;
-    ig_ack.ig_ack_header.receiver_sequence = ig_to_mg.ig_header.receiver_sequence ^ 1;
+    ig_ack.ig_ack_header.sender_sequence = ig_to_mg.ig_header.sender_sequence ^ 0x01;
+    ig_ack.ig_ack_header.receiver_sequence = ig_to_mg.ig_header.receiver_sequence ^ 0x01;
 
     ig_ack.ig_ack_header.crc_length = CRC_8;
     ig_ack.ig_ack_header.crc_poly = MY_CRC8_POLY;
 
     ig_ack.crc = crc8(reinterpret_cast<uint8_t*>(&ig_ack), sizeof(ig_ack_message)-1, ig_ack.ig_ack_header.crc_poly);
 
-    //send ack message 3 times, no need to wait response
-    for(int i = 0; i<3; i++) {
-      e22.sendFixedMessage(mg.mg_e22_addr_h, mg.mg_e22_addr_l, ig.e22_channel, msg_str, sizeof(ig_to_mg));    //boardcast
+    msg_str = reinterpret_cast<char*>(&ig_ack);
+
+    //send ack message 10 times, no need to wait response
+    for(int i = 0; i<10; i++) {
+      e22.sendFixedMessage(mg.mg_e22_addr_h, mg.mg_e22_addr_l, ig.e22_channel, msg_str, sizeof(ig_ack_message));
+      delay(10);
     }
     lcd.clear();
     lcd.print(F("Sync QB MG"));
@@ -1206,21 +1532,10 @@ bool sync_qb_mg() {
   }
 }
 
-bool update_to_mg(uint8_t qb_num) {
-  struct IG_Message{
-    e22_message_header ig_header;
-    uint16_t mg_mem_addr;
-    uint8_t date_dd;
-    uint8_t date_mm;
-    uint16_t date_yyyy;
-    uint8_t time_h;
-    uint8_t time_m;
-    uint32_t ic;
-    uint8_t status;
-    uint16_t crc;
-  } ig_to_mg;
+bool full_update_to_mg(uint8_t qb_num) {
+  ig_full_message ig_to_mg;
 
-  ig_to_mg.ig_header.message_type = UPDATE_INFO;
+  ig_to_mg.ig_header.message_type = FULL_UPDATE_INFO;
   ig_to_mg.ig_header.ack_payload = ACK_PAYLOAD;
   ig_to_mg.ig_header.sender_e22_addr_h = ig.my_e22_addr_h;
   ig_to_mg.ig_header.sender_e22_addr_l = ig.my_e22_addr_l;
@@ -1229,16 +1544,15 @@ bool update_to_mg(uint8_t qb_num) {
   ig_to_mg.ig_header.crc_length = CRC_16;
   ig_to_mg.ig_header.crc_poly = MY_CRC16_POLY;
 
+  ig_to_mg.qb_addr = person[qb_num].qb_addr;
   ig_to_mg.mg_mem_addr = person[qb_num].mg_mem_addr;
-  ig_to_mg.date_dd = person[qb_num].date_dd;
-  ig_to_mg.date_mm = person[qb_num].date_mm;
-  ig_to_mg.date_yyyy = person[qb_num].date_yyyy;
-  ig_to_mg.time_h = person[qb_num].time_h;
-  ig_to_mg.time_m = person[qb_num].time_m;
+  ig_to_mg.initial_latitude = ig.initial_latitude;
+  ig_to_mg.initial_longitude = ig.initial_longitude;
   ig_to_mg.ic = person[qb_num].ic;
+  ig_to_mg.hp_num = person[qb_num].hp_num;
   ig_to_mg.status = person[qb_num].status;
 
-  ig_to_mg.crc = crc16(reinterpret_cast<uint8_t*>(&ig_to_mg), sizeof(IG_Message)-1, ig_to_mg.ig_header.crc_poly);
+  ig_to_mg.crc = crc16(reinterpret_cast<uint8_t*>(&ig_to_mg), sizeof(ig_full_message)-2, ig_to_mg.ig_header.crc_poly);
 
   char* msg_str = reinterpret_cast<char*>(&ig_to_mg);
 
@@ -1249,7 +1563,7 @@ bool update_to_mg(uint8_t qb_num) {
 
   Retry:
   TCNT4 = 0;
-  ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_to_mg));    //boardcast
+  ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_full_message));    //boardcast
   if(rs.code!=1) {
     lcd.clear();
     lcd.print(F("Sync QB MG"));
@@ -1305,6 +1619,108 @@ bool update_to_mg(uint8_t qb_num) {
   lcd.print(F("to MG"));
   delay(1000);
   return true;
+}
+
+bool update_to_mg(uint8_t qb_num) {
+  ig_update_message update;
+
+  update.ig_header.message_type = UPDATE_INFO;
+  update.ig_header.ack_payload = ACK_PAYLOAD;
+  update.ig_header.sender_e22_addr_h = ig.my_e22_addr_h;
+  update.ig_header.sender_e22_addr_l = ig.my_e22_addr_l;
+  update.ig_header.sender_sequence = 0;
+  update.ig_header.receiver_sequence = 0;
+  update.ig_header.crc_length = CRC_16;
+  update.ig_header.crc_poly = MY_CRC16_POLY;
+
+  update.mg_mem_addr = person[qb_num].mg_mem_addr;
+  update.current_latitude = ig.latitude;
+  update.current_longitude = ig.longitude;
+  update.status = person[qb_num].status;
+
+  update.crc = crc16(reinterpret_cast<uint8_t*>(&update), sizeof(ig_update_message)-2, update.ig_header.crc_poly);
+
+  char* msg_str = reinterpret_cast<char*>(&update);
+
+  uint8_t retry = 0;
+  uint16_t steps;
+  // initialize timer4 
+  set_timer4_count_ms(3000, steps);
+
+  Retry:
+  TCNT4 = 0;
+  ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_update_message));    //boardcast
+  if(rs.code!=1) {
+    lcd.clear();
+    lcd.print(F("Updating QB"));
+    lcd.print(qb_num);
+    lcd.setCursor(0,1);
+    lcd.print(F("to MG Failed"));
+    delay(1000);
+    return false;
+  }
+  while(e22.available()<=1) {
+    uint16_t current = TCNT4;
+    if(current >= steps) {
+      if(retry<10) {
+        retry++;
+        delay(random(0,pow(2,retry)*5));    //random delay if collision happens (0 to 5ms * 2^retry)
+        goto Retry;
+      }
+      else {
+        lcd.clear();
+        lcd.print(F("Updating QB"));
+        lcd.print(qb_num);
+        lcd.setCursor(0,1);
+        lcd.print(F("to MG Failed"));
+        delay(1000);
+        return false;
+      }
+    }
+  }
+
+  //e22.avalable
+  struct mg_message{
+    e22_message_header mg_header;
+
+    uint8_t crc;
+  };
+  ResponseStructContainer rsc = e22.receiveMessage(sizeof(mg_message));
+  if (rsc.status.code!=1){
+    return false;
+  }
+  mg_message mg_to_ig = *(mg_message*)rsc.data;
+  if((mg_to_ig.mg_header.message_type != ACK) || (mg_to_ig.mg_header.ack_payload != ACK_ONLY)
+  || (mg_to_ig.mg_header.sender_sequence != update.ig_header.receiver_sequence) 
+  || (mg_to_ig.mg_header.receiver_sequence != (update.ig_header.sender_sequence ^ 0x01))
+  || (mg_to_ig.mg_header.crc_length != CRC_8)) {
+    retry++;
+    goto Retry;
+  }
+  uint8_t crc = crc8(reinterpret_cast<uint8_t*>(&mg_to_ig), sizeof(mg_message)-1, mg_to_ig.mg_header.crc_poly);
+  if(crc != mg_to_ig.crc) {
+    retry++;
+    goto Retry;
+  }
+  lcd.clear();
+  lcd.print(F("Updating QB"));
+  lcd.print(qb_num);
+  lcd.setCursor(0,1);
+  lcd.print(F("to MG Success"));
+  delay(1000);
+  return true;
+}
+
+ISR(TIMER5_OVF_vect)
+{
+  if(timer_counter < 72) {    //72 * 4.2s = 5mins
+    timer_counter ++;
+  }
+  else {
+    timer_counter = 0;
+    update_gps = true;
+    check_time = true;
+  }
 }
 
 
