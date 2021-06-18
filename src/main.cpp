@@ -378,38 +378,9 @@ void setup(){
   lcd.print(F("F1: Admin mode1"));
   lcd.setCursor(0,1);
   lcd.print(F("F2: Admin mode2"));
-
-  TCCR5A = 0;
-  TCCR5B = 0;
-  TCCR5B |= (1 << CS12) | (1 << CS10);  // Set CS12 and CS10 bits for 1024 prescaler
-  TIMSK5 |= (1<<TOIE5);     //enable overflow interrupt, will overflow every 4.2s
-  TCNT5 = 0;
-  sei();    //set interrupt
 }
   
 void loop(){
-  
-
-  if(update_gps) {
-    update_gps = false;
-    get_gps_info();
-    // 0.001 approximate to 111 m on equator
-    if((((ig.current_qb_number && ig.latitude-ig.initial_latitude)>0.001) || ((ig.longitude-ig.initial_longitude)>0.001))) {
-      for(int i = ig.current_qb_number; i >= 0; i--) {
-        person[i].status = MOVED;
-        update_to_mg(i);
-      }
-      lcd.clear();
-      lcd.print(F("F1: Admin mode1"));
-      lcd.setCursor(0,1);
-      lcd.print(F("F2: Admin mode2"));
-    }
-  }
-
-  if (nrf24.available(&pipe0)) {             // check for all rx pipe and return pipe number if data available
-    uint8_t qb_num = update_qb_info();     //update qb status and time according to data received
-    update_to_mg(qb_num);
-  }
   char customKey = customKeypad.getKey();
   if (customKey){
     switch(customKey)
@@ -433,13 +404,35 @@ void loop(){
     }
   }
 
+  if(update_gps) {
+    update_gps = false;
+    get_gps_info();
+    // 0.01 approximate to 1 km on equator
+    if((((ig.current_qb_number && ig.latitude-ig.initial_latitude)>0.01) || ((ig.longitude-ig.initial_longitude)>0.01))) {
+      for(int i = ig.current_qb_number; i >= 0; i--) {
+        person[i].status = MOVED;
+        update_to_mg(i);
+      }
+      lcd.clear();
+      lcd.print(F("F1: Admin mode1"));
+      lcd.setCursor(0,1);
+      lcd.print(F("F2: Admin mode2"));
+    }
+  }
+
+  if (nrf24.available(&pipe0)) {             // check for all rx pipe and return pipe number if data available
+    uint8_t qb_num = update_qb_info();     //update qb status and time according to data received
+    update_to_mg(qb_num);
+  }
+
   if(check_time) {
     check_time = false;
     get_gps_info();
     if(ig.current_qb_number) {
-      int8_t current_minute = ig.time_m;
-      int8_t current_hour = ig.time_h;
+      
       for(int i = ig.current_qb_number; i>=0; i--) {
+        int8_t current_minute = ig.time_m;
+        int8_t current_hour = ig.time_h;
         if(current_hour != person[i].time_h) {
           current_minute += 60;
         }
@@ -536,6 +529,7 @@ bool check_password(MyString input) {
     lcd.print(F("Password"));
     lcd.setCursor(0,1);
     lcd.print(F("Wrong"));
+    delay(1000);
     return false;
   }
 }
@@ -875,7 +869,21 @@ void admin_mode2() {
 
         if(wait_qb_update()) {
           uint8_t qb_num = update_qb_info();
+          lcd.clear();
+          lcd.print(F("Sending full"));
+          lcd.setCursor(0,1);
+          lcd.print(F("update to MG"));
           full_update_to_mg(qb_num);
+
+          //start checking timer for the 1st QB
+          if(ig.current_qb_number == 1) {
+            TCCR5A = 0;
+            TCCR5B = 0;
+            TCCR5B |= (1 << CS12) | (1 << CS10);  // Set CS12 and CS10 bits for 1024 prescaler
+            TIMSK5 |= (1<<TOIE5);     //enable overflow interrupt, will overflow every 4.2s
+            TCNT5 = 0;
+            sei();    //set interrupt
+          }
         }
         else {
           lcd.clear();
@@ -883,9 +891,9 @@ void admin_mode2() {
           lcd.setCursor(0,1);
           lcd.print(F("from QB"));
 
-        #ifdef DEBUG
-          Serial.println(F("No data received from QB"));
-        #endif
+          #ifdef DEBUG
+            Serial.println(F("No data received from QB"));
+          #endif
         }
       }
       goto Select_mode_2;
@@ -1151,6 +1159,11 @@ bool wait_qb_update() {
 		}
 	}
 
+  lcd.clear();
+  lcd.print(F("Received QB"));
+  lcd.setCursor(0,1);
+  lcd.print(F("update"));
+
   #ifdef DEBUG
     Serial.println(F("Received update from QB"));
   #endif
@@ -1339,15 +1352,15 @@ bool sync_to_mg() {
     delay(1000);
     return false;
   }
-  start_millis = millis();
 
   #ifdef DEBUG
-      Serial.println(F("Waiting response"));
-    #endif
+    Serial.println(F("Waiting response"));
+  #endif
+  start_millis = millis();
   while(e22.available()<=1) {
     current_millis = millis();
     if(current_millis - start_millis >= max_wait_millis) {
-      if(retry<10) {
+      if(retry<3) {
         retry++;    
         delay(random(0,pow(2,retry)*5));    //random delay if collision happens (0 to 5ms * 2^retry)
         goto Retry;
@@ -1425,7 +1438,7 @@ bool sync_to_mg() {
       #ifdef DEBUG
         Serial.println(F("Sending ack message to MG"));
       #endif
-      //send ack message 3 times, no need to wait response
+      //send ack message 5 times, no need to wait response
       for(int i = 0; i<3; i++) {
         e22.sendFixedMessage(mg.mg_e22_addr_h, mg.mg_e22_addr_l, ig.e22_channel, msg_str, sizeof(ig_ack_message));
         delay(500);
@@ -1540,7 +1553,12 @@ bool sync_qb_mg() {
   #ifdef DEBUG
     Serial.println(F("sending REQUEST_GOOGLESHEET_ROW message"));
   #endif
-  
+
+  lcd.clear();
+  lcd.print(F("Requesting Row"));
+  lcd.setCursor(0,1);
+  lcd.print(F("Number from MG"));
+
   ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_sync_message));    //boardcast
   if(rs.code!=1) {
     lcd.clear();
@@ -1559,7 +1577,7 @@ bool sync_qb_mg() {
   while(e22.available()<=1) {
     current_millis = millis();
     if(current_millis - start_millis >= max_wait_millis) {
-      if(retry<10) {
+      if(retry<3) {
         retry++;    
         delay(random(0,pow(2,retry)*5));    //random delay if collision happens (0 to 5ms * 2^retry)
         goto Retry;
@@ -1664,7 +1682,6 @@ bool full_update_to_mg(uint8_t qb_num) {
   uint8_t retry = 0;
 
   Retry:
-  unsigned long start_millis = millis();
   ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_full_message));    //boardcast
   if(rs.code!=1) {
     lcd.clear();
@@ -1674,10 +1691,11 @@ bool full_update_to_mg(uint8_t qb_num) {
     delay(1000);
     return false;
   }
+  unsigned long start_millis = millis();
   while(e22.available()<=1) {
     unsigned long current_millis = millis();
     if(current_millis - start_millis >= max_wait_millis) {
-      if(retry<10) {
+      if(retry<3) {
         retry++;
         delay(random(0,pow(2,retry)*5));    //random delay if collision happens (0 to 5ms * 2^retry)
         goto Retry;
@@ -1745,13 +1763,13 @@ bool update_to_mg(uint8_t qb_num) {
   char* msg_str = reinterpret_cast<char*>(&update);
 
   uint8_t retry = 0;
-  unsigned long max_wait_millis = 10000;    //max wait for 10s
+  unsigned long max_wait_millis = 10000;    //max wait for 3s
 
   Retry:
-  unsigned long start_millis = millis();
+  
   ResponseStatus rs = e22.sendFixedMessage(0xFF, 0xFF, ig.e22_channel, msg_str, sizeof(ig_update_message));    //boardcast
   if(rs.code!=1) {
-    if(retry<10) {
+    if(retry<3) {
       retry++;
       delay(random(0,pow(2,retry)*5));    //random delay if collision happens (0 to 5ms * 2^retry)
       goto Retry;
@@ -1763,13 +1781,18 @@ bool update_to_mg(uint8_t qb_num) {
       lcd.setCursor(0,1);
       lcd.print(F("to MG Failed"));
       delay(1000);
+      lcd.clear();
+      lcd.print(F("F1: Admin mode1"));
+      lcd.setCursor(0,1);
+      lcd.print(F("F2: Admin mode2"));
       return false;
     }
   }
+  unsigned long start_millis = millis();
   while(e22.available()<=1) {
     unsigned long current_millis  = millis();
     if(current_millis - start_millis>= max_wait_millis) {
-      if(retry<10) {
+      if(retry<3) {
         retry++;
         delay(random(0,pow(2,retry)*5));    //random delay if collision happens (0 to 5ms * 2^retry)
         goto Retry;
@@ -1781,6 +1804,10 @@ bool update_to_mg(uint8_t qb_num) {
         lcd.setCursor(0,1);
         lcd.print(F("to MG Failed"));
         delay(1000);
+        lcd.clear();
+        lcd.print(F("F1: Admin mode1"));
+        lcd.setCursor(0,1);
+        lcd.print(F("F2: Admin mode2"));
         return false;
       }
     }
@@ -1815,6 +1842,10 @@ bool update_to_mg(uint8_t qb_num) {
   lcd.setCursor(0,1);
   lcd.print(F("to MG Success"));
   delay(1000);
+  lcd.clear();
+  lcd.print(F("F1: Admin mode1"));
+  lcd.setCursor(0,1);
+  lcd.print(F("F2: Admin mode2"));
   return true;
 }
 
@@ -1829,5 +1860,4 @@ ISR(TIMER5_OVF_vect)
     check_time = true;
   }
 }
-
 
