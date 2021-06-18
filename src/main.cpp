@@ -547,6 +547,10 @@ void admin_mode1() {
   bool temp = check_password(keypad_input());
 
   if(!temp) {
+    lcd.clear();
+    lcd.print(F("F1: Admin mode1"));
+    lcd.setCursor(0,1);
+    lcd.print(F("F2: Admin mode2"));
     return;
   }
 
@@ -723,6 +727,10 @@ void admin_mode2() {
   bool temp = check_password(keypad_input());
   
   if(!temp) {
+    lcd.clear();
+    lcd.print(F("F1: Admin mode1"));
+    lcd.setCursor(0,1);
+    lcd.print(F("F2: Admin mode2"));
     return;
   }
 
