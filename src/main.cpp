@@ -283,7 +283,7 @@ void setup(){
   lcd.print(F("E22 ..."));
 
   e22.begin();    //init e22 lora module
-  delay(500);
+  delay(1000);
 
   randomSeed(analogRead(A0));       //read floting pin and use as random seed
   ig.my_nrf24_addr = random(1, 0x7FFFFFFE);       //MSbit must be 0 for random() to work with 32bits
@@ -298,7 +298,7 @@ void setup(){
     lcd.print(F("check wiring"));
     while(1);
   }
-  delay(500);
+  delay(1000);
   #ifdef DEBUG
     Serial.print(F("ig_e22_addr: "));
     Serial.print(ig.my_e22_addr_h,16);
@@ -342,7 +342,7 @@ void setup(){
   lcd.setCursor(0,1);
   lcd.print(F("NRF24 ..."));
 
-  delay(100);
+  delay(1000);
 
   if (!nrf24.begin()) {
     lcd.clear();
@@ -354,7 +354,6 @@ void setup(){
   lcd.print(F("Waiting GPS"));
   lcd.setCursor(0,1);
   lcd.print(F("signal..."));
-  delay(1000);
 
   while(!get_gps_info());
   ig.initial_latitude = ig.latitude;
